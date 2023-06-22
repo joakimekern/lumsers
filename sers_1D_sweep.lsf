@@ -2,17 +2,17 @@
 # Script to extract the relevant results of a waveguide as one or more variables are sweeped
 # The sweep properties can be set under 'Sweep parameters'
 # The injection axis is assumed to be x, the height of the waveguide is assumed to be in z, and the width in y
-# The formula for the conversion efficiency is found in "Efficiency of evanescent excitation and collection of spontaneous Raman scattering near high index contrast channel waveguides" (2015),
-# by A. Dhakal et al.
 # ===========
 clear;
-switchtolayout;
+
 #==================
 # Input parameters
 #==================
 
 selected_mode = "mode1";
 pump_lambda = 785e-9;
+stokes_lambda = 877e-9;
+include_stokes = false;    # If the Stokes shift should be included. Slightly more accurate, twice as slow
 cladding_index = 1;        # Air
 #cladding_index = 1.538;    # NTP
 index_margin = 0.01;
@@ -27,24 +27,14 @@ meshcells_x = 10;
 meshcells_y = 10;
 
 # Sweep parameters
+parameter_name = "wg_width";
 parameter_scope = "::model";
-parameter_name = "slot_width";
-widths = linspace(500, 5000, 51) * 1e-9;
-gaps = linspace(150, 0, 51) * 1e-9;
-parameter_values = 2 * widths + gaps;
-
-# Setup. Include the mesh slot, but no additional layers
-setnamed("mesh_slot", "enabled", 1);
-setnamed("::model", "t_au", 0);
-setnamed("::model", "t_alox", 0);
-setnamed("::model", "t_ntp", 0);
-setnamed("alumina", "enabled",0);
-setnamed("plasmon", "enabled", 0);
-setnamed("ntp", "enabled", 0);
+#parameter_values = linspace(350, 700, 36) * 1e-9;    # Increment: 10
+parameter_values = [500] * 1e-9;
 
 # Save results
-save_to_json = true;
-savename = "input_taper_sweep.json";
+save_to_json = false;
+savename = "test.json";
 
 #==================
 # Functions
@@ -152,11 +142,17 @@ function get_integrated_luminosity(area1, area2, lambda2, ng1, ng2, n2){
     return constants * ref_indices * lambda2^2 * area1 * area2;
 }
 
+function get_integrated_luminosity_noconst(area1, area2, filter, x, y){
+    lum = integrate(area1 * area2 * filter, 1:2, x, y);
+    return lum;
+}
+
 function get_int_lum_constants(mode){
     loss = getdata("FDE::data::" + mode, "loss");
     ng = real(getdata("FDE::data::" + mode, "ng"));
     neff = real(getdata("FDE::data::" + mode, "neff"));
     
+    constants = [loss, ng, neff];
     return {"loss": loss, "ng": ng, "neff": neff};
 }
 
@@ -185,7 +181,7 @@ function set_and_run(scope, name, value, wavelength){
     return n;
 }
 
-function calculate_results(mode, xaxis, yaxis, n_clad, n_marg, shiftx, shifty, wavelength){
+function calculate_results(mode, xaxis, yaxis, n_clad, n_marg, shiftx, shifty, use_stokes, lambda_p, lambda_s){
     # Get the cross section
         x = pinch(getdata("FDE::data::material",xaxis));
         y = pinch(getdata("FDE::data::material",yaxis));
@@ -194,17 +190,42 @@ function calculate_results(mode, xaxis, yaxis, n_clad, n_marg, shiftx, shifty, w
         filter_surf = surface_filter(1, n_marg, shiftx, shifty);    # Always uses 1, air. When considering NTP, it is better to use bulk filter
         
         # Get the constants
-        constants = get_int_lum_constants(mode);  # [loss, group index, effective index]
+        constants_p = get_int_lum_constants(mode);  # [loss, group index, effective index]
+        constants_s = matrix(3);
         
         # Get the mode area
-        area = get_inv_eff_mode_area(mode, x, y);
+        area_pump = get_inv_eff_mode_area(mode, x, y);
+        area_stokes = area_pump; # Initialize
         
+        if(use_stokes){
+            # Find modes at the Stokes wavelength
+            switchtolayout;
+            setanalysis("wavelength", lambda_s);
+            run;
+            n_modes_stokes = findmodes;
+            
+            # If the mode exists, save the Stokes constants
+            if(n_modes_stokes != 0){
+                constants_s = get_int_lum_constants(mode);
+                # Update the Stokes mode area
+                area_s = get_inv_eff_mode_area(mode, x, y);
+            }
+        } else {
+            n_modes_stokes = 0;
+        }
         
         # Calculate the integrated luminosity
-        lum_bulk = integrate(area^2 * filter_bulk, 1:2, x, y);
-        lum_surf = integrate(area^2 * filter_surf, 1:2, x, y);
+        lum_bulk_p = integrate(area_pump^2 * filter_bulk, 1:2, x, y);
+        lum_surf_p = integrate(area_pump^2 * filter_surf, 1:2, x, y);
+        if (use_stokes){
+            lum_bulk_s = integrate(area_pump * area_stokes * filter_bulk, 1:2, x, y);
+            lum_surf_s = integrate(area_pump * area_stokes * filter_surf, 1:2, x, y);
+        } else {
+            lum_bulk_s = 0;
+            lum_surf_s = 0;
+        }
         
-        return {"lum_bulk": lum_bulk, "lum_surf": lum_surf, "loss": constants.loss, "ng": constants.ng, "neff": constants.neff};
+        return [lum_bulk_p; lum_surf_p; lum_bulk_s; lum_surf_s; constants_p.loss; constants_p.ng; constants_p.neff; constants_s(1); constants_s(2); constants_s(3); n_modes_stokes];
 }
 
 #==================
@@ -212,14 +233,19 @@ function calculate_results(mode, xaxis, yaxis, n_clad, n_marg, shiftx, shifty, w
 #==================
 
 n_val = length(parameter_values);
-# Arrays to store the sweep results
+# Array to store the sweep results
+ce = matrix(n_val);
 integrated_luminosity_bulk = matrix(n_val);
 integrated_luminosity_surf = matrix(n_val);
-# Arrays to store the loss, group index, and effective index at the given wavelength
-loss = matrix(n_val);
-ng = matrix(n_val);
-neff = matrix(n_val);
-n_modes = matrix(n_val);
+# Arrays to store the loss, group index, and effective index at the pump and Stokes wavelength
+loss_p = matrix(n_val);
+loss_s = matrix(n_val);
+ng_p = matrix(n_val);
+ng_s = matrix(n_val);
+neff_p = matrix(n_val);
+neff_s = matrix(n_val);
+n_modes_p = matrix(n_val);
+n_modes_s = matrix(n_val);
 
 # Initialize the constant used in Dhakal et al.
 kv = 1.26e23;    
@@ -228,31 +254,42 @@ dhakal_const = pi^2 / eps0^2 / kv;
 # Run the sweep
 for(i=1; i <= n_val; i=i+1){
 #for(i=1; i <= 0; i=i+1){ # Stop the loop from starting, for debugging
-    ?"Now analysing parameter 'width' = '" + num2str(widths(i)) + "' and 'gap' = '" + num2str(gaps(i)) + "'";
-    # Set the new parameters
-    setnamed(parameter_scope, "wg_width", widths(i));
-    n_modes(i) = set_and_run(parameter_scope, "wg_gap", gaps(i), pump_lambda);
+    ?"Now analysing parameter '" + parameter_name + "' with value '" + num2str(parameter_values(i)) + "'";
+    # Set the new parameter
+    n_modes_p(i) = set_and_run(parameter_scope, parameter_name, parameter_values(i), pump_lambda);
     
-    # Store results if modes are found
-    if(n_modes(i) != 0){
+    # If no modes are found, do not throw error, simply append 0. This keeps the script running
+    if(n_modes_p(i) != 0){
         
         # Calculate and store the results
-        res = calculate_results(selected_mode, width_axis, height_axis, cladding_index, index_margin, meshcells_x, meshcells_y, pump_lambda);        
-        loss(i) = res.loss;
-        ng(i) = res.ng;
-        neff(i) = res.neff;
+        res = calculate_results(selected_mode, width_axis, height_axis, cladding_index, index_margin, meshcells_x, meshcells_y, include_stokes, pump_lambda, stokes_lambda);        
+        loss_p(i) = res(5);
+        loss_s(i) = res(8);
+        ng_p(i) = res(6);
+        ng_s(i) = res(9);
+        neff_p(i) = res(7);
+        neff_s(i) = res(10);
+        n_modes_s(i) = res(11);
         
-        # Calculate the integrated luminosity in bulk and at the surface
-        integrated_luminosity_bulk(i) = res.lum_bulk;
-        integrated_luminosity_surf(i) = res.lum_surf;
-        factor = dhakal_const * dhakal_factor(ng(i), ng(i), neff(i), neff(i), pump_lambda, pump_lambda);       
+        # Calculate the conversion efficiency as in Dhakal
+        if (include_stokes){
+            integrated_luminosity_bulk(i) = res(3);
+            integrated_luminosity_surf(i) = res(4);
+            factor = dhakal_const * dhakal_factor(ng_p(i), ng_s(i), neff_p(i), neff_s(i), pump_lambda, stokes_lambda);
+        } else {
+            integrated_luminosity_bulk(i) = res(1);
+            integrated_luminosity_surf(i) = res(2);
+            factor = dhakal_const * dhakal_factor(ng_p(i), ng_p(i), neff_p(i), neff_p(i), pump_lambda, pump_lambda);
+        }
         
-        # Save each iteration
+        ce(i) = factor * integrated_luminosity_bulk(i);      
+
+        # Save for each iteration
         if(save_to_json){
-            jsonsave(savename, parameter_name, parameter_values, integrated_luminosity_bulk, integrated_luminosity_surf, loss, ng, neff, n_modes, pump_lambda, dhakal_const, cladding_index);
+               jsonsave(savename, parameter_name, parameter_values, ce, integrated_luminosity_bulk, integrated_luminosity_surf, loss_p, ng_p, neff_p, loss_s, ng_s, neff_s, n_modes_p, n_modes_s, pump_lambda, stokes_lambda, dhakal_const, cladding_index);
         }
     }
 }
 
 # Plot results
-plot(parameter_values, loss);
+plot(parameter_values, ce);
