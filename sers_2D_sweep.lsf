@@ -23,12 +23,18 @@ parameter_values1 = linspace(800, 200, 25) * 1e-9;
 parameter_values2 = linspace(5, 150, 30) * 1e-9;
 
 # Setup. Only consider the waveguide itself, and exclude the mesh in the slot. Include no additional layers
-setnamed("::model", "t_au", 0);
+setnamed("::model", "wg_width", 500);
+setnamed("::model", "wg_gap", 150);
+setnamed("::model", "wg_height", 140);
+
 setnamed("::model", "t_alox", 0);
+setnamed("::model", "t_au", 0);
 setnamed("::model", "t_ntp", 0);
+
 setnamed("alumina", "enabled",0);
 setnamed("plasmon", "enabled", 0);
 setnamed("ntp", "enabled", 0);
+
 setnamed("mesh_slot", "enabled", 0);
 
 # Misc. Should in general not be modified
