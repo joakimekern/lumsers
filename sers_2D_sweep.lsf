@@ -1,40 +1,28 @@
 # ===========
 # Script to extract the relevant results of a waveguide as one or more variables are sweeped
-# The sweep properties can be set under 'Sweep parameters'
-# The injection axis is assumed to be x, the height of the waveguide is assumed to be in z, and the width in y
+# The sweep properties are modified under 'Setup parameters'. The parameters to be sweeped are found under 'Sweep parameters'
+# Note that the injection axis is set to x, the height of the waveguide is in z, and the width is in y
 # ===========
 clear;
 switchtolayout;
 #==================
-# Input parameters
+# Setup parameters
 #==================
+# Modify the sweep here
 
-selected_mode = "mode1";
-pump_lambda = 785e-9;
-cladding_index = 1;        # Air
-#cladding_index = 1.538;    # NTP
-index_margin = 0.01;
-
-# Geometry
-injection_axis = "x";   # Not used
-width_axis = "y";
-height_axis = "z";
-
-# Surface. Define the number of mesh cells in x and y which define the surface of the wg structure
-meshcells_x = 10;
-meshcells_y = 10;
+# Save results
+save_to_json = true;
+savename = "gap_width_sweep_reallyfine.json";
 
 # Sweep parameters
-# A 2D sweep of the rail width and gap is performed. The height was set to 140 nm.
-# The Stokes shift is excluded. No additional layers (Au, A2O3 or NTP) was included.
-# The mesh in the slot was excluded
-parameter_scope = "::model";
-parameter_name1 = "wg_width";
-parameter_name2 = "wg_gap";
+# In this example, a 2D sweep of the rail width and gap is performed. The height was set to 140 nm
+parameter_scope = "::model";        # The 'Object' in the Lumerical file which stores the parameters to be sweeped
+parameter_name1 = "wg_width";       # The name of the first parameter to be sweeped
+parameter_name2 = "wg_gap";         # The name of the second parameter to be sweeped
 parameter_values1 = linspace(800, 200, 25) * 1e-9;
 parameter_values2 = linspace(5, 150, 30) * 1e-9;
 
-# Setup. Only consider the waveguide itself, and exclude the mesh in the slot
+# Setup. Only consider the waveguide itself, and exclude the mesh in the slot. Include no additional layers
 setnamed("::model", "t_au", 0);
 setnamed("::model", "t_alox", 0);
 setnamed("::model", "t_ntp", 0);
@@ -43,16 +31,33 @@ setnamed("plasmon", "enabled", 0);
 setnamed("ntp", "enabled", 0);
 setnamed("mesh_slot", "enabled", 0);
 
-# Save results
-save_to_json = true;
-savename = "gap_width_sweep_reallyfine.json";
+# Misc. Should in general not be modified
+selected_mode = "mode1";    # Only one mode wil be considered. In slot waveguides, this is always the fundamental TE mode
+pump_lambda = 785e-9;       # Pump wavelength
+cladding_index = 1;         # Air index
+# cladding_index = 1.538;   # NTP index. Not in use
+index_margin = 0.01;        # Margin of error when comparing indices in the filter function. Not necessary to modify
+
+# Geometry. Must be changed if x is not the injection axis.
+injection_axis = "x";       # Not used
+width_axis = "y";
+height_axis = "z";
+
+# Surface filter. Define the number of mesh cells in x and y which define the surface of the wg structure
+meshcells_x = 10;
+meshcells_y = 10;
 
 #==================
 # Functions
 #==================
+# Unless changing the script, do not edit the functions here
 
-# A filter seperating out the bulk region of interest
 function bulk_filter(n_reg_interest, n_margin){
+# A filter seperating out the bulk region of interest
+# n_reg_interest: float. Refractive index of the region of interest (usually 1, air)
+# n_margin: float. Indicies within n_reg_interest +- n_margin are considered to be in the region of interest
+# returns: A 2D matrix filter of zeros and ones. It is one in the region of interest, and zero otherwise
+
     # Get the refractive index and the axis lengths
     ri = real(pinch(getdata("FDE::data::material","index_x")));
     dim = size(ri);
@@ -70,6 +75,12 @@ function bulk_filter(n_reg_interest, n_margin){
 }
 
 function shift_matrix(m, num, direction){
+# Function to shift a 2D matrix in any of the four directions: up, down, left, right
+# m: 2D matrix
+# num: int, positive. Number of cells to shift
+# direction: str. Which direction to shift
+# returns: 2D matrix
+
     # Get the dimensions of the original matrix
     dim = size(m);
     x = dim(1);
@@ -97,9 +108,14 @@ function shift_matrix(m, num, direction){
     return m2;
 }
 
-# Create a surface filter in a region of interest. The surface is defined by 'xshift' number of mesh cells horizontally,
-# and 'yshift' number of mesh cells vertically
 function surface_filter(n_reg_interest, n_marg, xshift, yshift){
+# Creates a surface filter in a region of interest. Only regions close to this surface are considered.
+# n_reg_interest: float. Refractive index of the region of interest (usually 1, air)
+# n_margin: float. Indicies within n_reg_interest +- n_margin are considered to be in the region of interest
+# xshift: int, positive. Horizontal shift in number of mesh cells
+# yshift: int, positive. Vertical shift in number of mesh cells
+# returns: A 2D matrix filter of zeros and ones. It is one in the region of interest, and zero otherwise
+
     # Initialize a filter seperating out the region of interest
     mask = bulk_filter(n_reg_interest, n_marg);
     
@@ -120,13 +136,18 @@ function surface_filter(n_reg_interest, n_marg, xshift, yshift){
     return final * mask;  
 }
 
-# A filter only containing the slot. Not implemented
 function slot_filter(n_reg_interest){
+# A filter only containing the slot. Not implemented
     return 0;
 }
 
-# Function to get the inverse effective mode area of a given mode. x and y are the cross-section axes
 function get_inv_eff_mode_area(mode, x, y){
+# Function to get the inverse effective mode area of a given mode. x and y are the cross-section axes
+# mode: str. The mode in the FDE object to be considered. Should always be 'mode1'
+# x: array of floats. The horizontal axis
+# y: array of floats. The vertical axis
+# returns: 2D matrix
+
     # Get the electric field amplitude
     Enorm2 = pinch(getelectric("FDE::data::" + mode));
     # Calculate the permittivity from the RI
@@ -141,19 +162,11 @@ function get_inv_eff_mode_area(mode, x, y){
     return Enorm2 / charge;
 }
 
-# Returns the integrated luminosity of a given mode. Both the pump and Stokes shift can be taken
-# into account, in which case 1 denotes pump and 2 denotes Stokes. area is the inverse effective
-# mode area. area1 and area2 should be cross-sections over the same area, and are thus integratable
-function get_integrated_luminosity(area1, area2, lambda2, ng1, ng2, n2){
-    # Initialize the constants    
-    kv = 1.26e23;    
-    constants = pi^2 / eps0^2 / kv;
-    ref_indices = ng1 * ng2 / n2;
-    
-    return constants * ref_indices * lambda2^2 * area1 * area2;
-}
-
 function get_int_lum_constants(mode){
+# Get the constants necessary to calculate the integrated luminosity of a given mode
+# mode: str. The mode in the FDE object to be analysed. Should always be 'mode1'
+# returns: struct of floats.
+
     loss = getdata("FDE::data::" + mode, "loss");
     ng = real(getdata("FDE::data::" + mode, "ng"));
     neff = real(getdata("FDE::data::" + mode, "neff"));
@@ -161,9 +174,15 @@ function get_int_lum_constants(mode){
     return {"loss": loss, "ng": ng, "neff": neff};
 }
 
-# Function to simply calculate the Dhakal prefactor, as it depends on whether or not the Stokes
-# shift is taken into consideration
 function dhakal_factor(ng1, ng2, neff1, neff2, l_p, l_s){
+# Function to calculate the Dhakal prefactor. May or may not account for the Stokes shift
+# ng1: complex. Group index at pump wavelength
+# ng2: complex. Group index at Stokes shift
+# l_p: float. Wavelength of the pump
+# l_s: float. Wavelength of the Stokes shift
+# returns: complex.
+
+    # If the Stokes shift is not accounted for
     if(ng2 == 0){
         ng2 = ng1;
         neff2 = neff1;
@@ -172,9 +191,14 @@ function dhakal_factor(ng1, ng2, neff1, neff2, l_p, l_s){
     return ng1 * ng2 * l_s^2 / neff2;
 }
 
-# Given a parameter and its value, set it and calculate the number of modes. The wavelength
-# must be specified as well
 function set_and_run(scope, name, value, wavelength){
+# Given a parameter and its value, set it and calculate the number of modes. The wavelength must be specified as well
+# scope: str. The location of the parameter. Should always be "::model"
+# name: str. Parameter name
+# value: The new value of the parameter. Usually a float
+# wavelength: The wavelength to run the simulation at. Usually at the pump, or Stokes shift
+# returns: int. Number of modes
+
     # Set the new parameter
     switchtolayout;
     setnamed(scope, name, value);
@@ -187,30 +211,42 @@ function set_and_run(scope, name, value, wavelength){
 }
 
 function calculate_results(mode, xaxis, yaxis, n_clad, n_marg, shiftx, shifty, wavelength){
+# Calculate the results when in analysis mode.
+# mode: str. Mode of interest in the FDE object. Should be 'mode1'
+# xaxis: str. Horizontal axis
+# yaxis: str. Vertical axis
+# n_clad: float. Refractive index of the waveguide cladding. Usually air (1) or NTP (1.538)
+# n_marg: float. Margin of error in the refractive index filters
+# shiftx: int, positive. Horizontal shift of the filters
+# shifty: int, positive. Vertical shift of the filters
+# wavelength: float. The wavelength at which analysis is done. Should be the pump.
+# returns: struct of complex/floats
+
     # Get the cross section
-        x = pinch(getdata("FDE::data::material",xaxis));
-        y = pinch(getdata("FDE::data::material",yaxis));
-        # Make the filter    
-        filter_bulk = bulk_filter(n_clad, n_marg);    
-        filter_surf = surface_filter(1, n_marg, shiftx, shifty);    # Always uses 1, air. When considering NTP, it is better to use bulk filter      
+    x = pinch(getdata("FDE::data::material",xaxis));
+    y = pinch(getdata("FDE::data::material",yaxis));
+    # Make the filter    
+    filter_bulk = bulk_filter(n_clad, n_marg);    
+    filter_surf = surface_filter(1, n_marg, shiftx, shifty);    # Always uses 1, air. When considering NTP, it is better to use bulk filter      
+    
+    # Get the constants
+    constants = get_int_lum_constants(mode);  # [loss, group index, effective index]
+    
+    # Get the mode area
+    area = get_inv_eff_mode_area(mode, x, y);
+    
+    
+    # Calculate the integrated luminosity
+    lum_bulk = integrate(area^2 * filter_bulk, 1:2, x, y);
+    lum_surf = integrate(area^2 * filter_surf, 1:2, x, y);
         
-        # Get the constants
-        constants = get_int_lum_constants(mode);  # [loss, group index, effective index]
-        
-        # Get the mode area
-        area = get_inv_eff_mode_area(mode, x, y);
-        
-        
-        # Calculate the integrated luminosity
-        lum_bulk = integrate(area^2 * filter_bulk, 1:2, x, y);
-        lum_surf = integrate(area^2 * filter_surf, 1:2, x, y);
-        
-        return {"lum_bulk": lum_bulk, "lum_surf": lum_surf, "loss": constants.loss, "ng": constants.ng, "neff": constants.neff};
+    return {"lum_bulk": lum_bulk, "lum_surf": lum_surf, "loss": constants.loss, "ng": constants.ng, "neff": constants.neff};
 }
 
 #==================
 # Script
 #==================
+# The actual exection of the script. Should not be edited, unless modifying the script
 
 nrow = length(parameter_values1);
 ncol = length(parameter_values2);
@@ -271,7 +307,5 @@ for(i=1; i <= nrow; i=i+1){
         }
     }
 }
-
-
-
+# Plot the results
 image(parameter_values1, parameter_values2, integrated_luminosity_bulk);
