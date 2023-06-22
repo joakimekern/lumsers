@@ -1,0 +1,277 @@
+# ===========
+# Script to extract the relevant results of a waveguide as one or more variables are sweeped
+# The sweep properties can be set under 'Sweep parameters'
+# The injection axis is assumed to be x, the height of the waveguide is assumed to be in z, and the width in y
+# ===========
+clear;
+switchtolayout;
+#==================
+# Input parameters
+#==================
+
+selected_mode = "mode1";
+pump_lambda = 785e-9;
+cladding_index = 1;        # Air
+#cladding_index = 1.538;    # NTP
+index_margin = 0.01;
+
+# Geometry
+injection_axis = "x";   # Not used
+width_axis = "y";
+height_axis = "z";
+
+# Surface. Define the number of mesh cells in x and y which define the surface of the wg structure
+meshcells_x = 10;
+meshcells_y = 10;
+
+# Sweep parameters
+# A 2D sweep of the rail width and gap is performed. The height was set to 140 nm.
+# The Stokes shift is excluded. No additional layers (Au, A2O3 or NTP) was included.
+# The mesh in the slot was excluded
+parameter_scope = "::model";
+parameter_name1 = "wg_width";
+parameter_name2 = "wg_gap";
+parameter_values1 = linspace(800, 200, 25) * 1e-9;
+parameter_values2 = linspace(5, 150, 30) * 1e-9;
+
+# Setup. Only consider the waveguide itself, and exclude the mesh in the slot
+setnamed("::model", "t_au", 0);
+setnamed("::model", "t_alox", 0);
+setnamed("::model", "t_ntp", 0);
+setnamed("alumina", "enabled",0);
+setnamed("plasmon", "enabled", 0);
+setnamed("ntp", "enabled", 0);
+setnamed("mesh_slot", "enabled", 0);
+
+# Save results
+save_to_json = true;
+savename = "gap_width_sweep_reallyfine.json";
+
+#==================
+# Functions
+#==================
+
+# A filter seperating out the bulk region of interest
+function bulk_filter(n_reg_interest, n_margin){
+    # Get the refractive index and the axis lengths
+    ri = real(pinch(getdata("FDE::data::material","index_x")));
+    dim = size(ri);
+    x = dim(1);
+    y = dim(2);
+    # Create the matrix to compare with the refractive index    
+    background_matrix = ones(x, y) * n_reg_interest;
+    
+    # Create the filter. 
+    # All grid points with an index value equal (almost) to the background index is set to 1.
+    # All other points are set to 0.
+    filter = almostequal(ri, background_matrix, n_margin, n_margin);
+
+    return filter;
+}
+
+function shift_matrix(m, num, direction){
+    # Get the dimensions of the original matrix
+    dim = size(m);
+    x = dim(1);
+    y = dim(2);
+    # Create a new matrix
+    m2 = ones(x, y);
+    
+    # Shift the old matrix
+    if(direction == "up"){
+        m2(1:x, num+1:y) = m(1:x, 1:y-num);
+    }
+    else if(direction == "left"){
+        m2(1:x-num, 1:y) = m(num+1:x, 1:y);
+    }
+    else if(direction == "right"){
+        m2(num+1:x, 1:y) = m(1:x-num, 1:y);
+    }
+    else if(direction == "down"){
+        m2(1:x, 1:y-num+1) = m(1:x, num:y);
+    }
+    else {return 0;}
+    
+    # Invert the matrix and return. This ensures the new edges are 0
+    m2 = m2 == 0;
+    return m2;
+}
+
+# Create a surface filter in a region of interest. The surface is defined by 'xshift' number of mesh cells horizontally,
+# and 'yshift' number of mesh cells vertically
+function surface_filter(n_reg_interest, n_marg, xshift, yshift){
+    # Initialize a filter seperating out the region of interest
+    mask = bulk_filter(n_reg_interest, n_marg);
+    
+    # Make masks shifting the filter in four directions
+    topmask = shift_matrix(mask, yshift, "up");
+    rightmask = shift_matrix(mask, xshift, "right");
+    leftmask = shift_matrix(mask, xshift, "left");
+    downmask = shift_matrix(mask, yshift, "down");
+    # Combine the shifted masks
+    ormask = topmask + rightmask + leftmask + downmask;
+    # Do boolean operations to create the final mask
+    #final = mask * ormask;
+    #final = final != 0;
+    f1 = ormask != 4;
+    f2 = ormask != 0;
+    final = f1 * f2;    
+    
+    return final * mask;  
+}
+
+# A filter only containing the slot. Not implemented
+function slot_filter(n_reg_interest){
+    return 0;
+}
+
+# Function to get the inverse effective mode area of a given mode. x and y are the cross-section axes
+function get_inv_eff_mode_area(mode, x, y){
+    # Get the electric field amplitude
+    Enorm2 = pinch(getelectric("FDE::data::" + mode));
+    # Calculate the permittivity from the RI
+    index = getdata("FDE::data::material", "index_z");
+    permittivity = sqrt(real(pinch(index)));
+    
+    # Get |E|^2 times the permittivity (epsilon) at each grid point and integrate
+    # to get the total charge
+    charge = Enorm2 * permittivity;
+    charge = integrate(charge, [1, 2], x, y);
+   
+    return Enorm2 / charge;
+}
+
+# Returns the integrated luminosity of a given mode. Both the pump and Stokes shift can be taken
+# into account, in which case 1 denotes pump and 2 denotes Stokes. area is the inverse effective
+# mode area. area1 and area2 should be cross-sections over the same area, and are thus integratable
+function get_integrated_luminosity(area1, area2, lambda2, ng1, ng2, n2){
+    # Initialize the constants    
+    kv = 1.26e23;    
+    constants = pi^2 / eps0^2 / kv;
+    ref_indices = ng1 * ng2 / n2;
+    
+    return constants * ref_indices * lambda2^2 * area1 * area2;
+}
+
+function get_int_lum_constants(mode){
+    loss = getdata("FDE::data::" + mode, "loss");
+    ng = real(getdata("FDE::data::" + mode, "ng"));
+    neff = real(getdata("FDE::data::" + mode, "neff"));
+    
+    return {"loss": loss, "ng": ng, "neff": neff};
+}
+
+# Function to simply calculate the Dhakal prefactor, as it depends on whether or not the Stokes
+# shift is taken into consideration
+function dhakal_factor(ng1, ng2, neff1, neff2, l_p, l_s){
+    if(ng2 == 0){
+        ng2 = ng1;
+        neff2 = neff1;
+        l_s = l_p;
+    }
+    return ng1 * ng2 * l_s^2 / neff2;
+}
+
+# Given a parameter and its value, set it and calculate the number of modes. The wavelength
+# must be specified as well
+function set_and_run(scope, name, value, wavelength){
+    # Set the new parameter
+    switchtolayout;
+    setnamed(scope, name, value);
+    setanalysis("wavelength", wavelength);
+    # Run
+    run;
+    n = findmodes;
+    
+    return n;
+}
+
+function calculate_results(mode, xaxis, yaxis, n_clad, n_marg, shiftx, shifty, wavelength){
+    # Get the cross section
+        x = pinch(getdata("FDE::data::material",xaxis));
+        y = pinch(getdata("FDE::data::material",yaxis));
+        # Make the filter    
+        filter_bulk = bulk_filter(n_clad, n_marg);    
+        filter_surf = surface_filter(1, n_marg, shiftx, shifty);    # Always uses 1, air. When considering NTP, it is better to use bulk filter      
+        
+        # Get the constants
+        constants = get_int_lum_constants(mode);  # [loss, group index, effective index]
+        
+        # Get the mode area
+        area = get_inv_eff_mode_area(mode, x, y);
+        
+        
+        # Calculate the integrated luminosity
+        lum_bulk = integrate(area^2 * filter_bulk, 1:2, x, y);
+        lum_surf = integrate(area^2 * filter_surf, 1:2, x, y);
+        
+        return {"lum_bulk": lum_bulk, "lum_surf": lum_surf, "loss": constants.loss, "ng": constants.ng, "neff": constants.neff};
+}
+
+#==================
+# Script
+#==================
+
+nrow = length(parameter_values1);
+ncol = length(parameter_values2);
+# Arrays to store the sweep results
+integrated_luminosity_bulk = matrix(nrow, ncol);
+integrated_luminosity_surf = matrix(nrow, ncol);
+# Arrays to store the loss, group index, and effective index at the given wavelength
+loss = matrix(nrow, ncol);
+ng = matrix(nrow, ncol);
+neff = matrix(nrow, ncol);
+n_modes = matrix(nrow, ncol);
+
+# Initialize the constant used in Dhakal et al.
+kv = 1.26e23;    
+dhakal_const = pi^2 / eps0^2 / kv;
+
+# Run the sweep
+for(i=1; i <= nrow; i=i+1){
+#for(i=1; i <= 0; i=i+1){ # Stop the loop from starting, for debugging
+    switchtolayout;
+    setnamed(parameter_scope, parameter_name1, parameter_values1(i));
+    for(j=1; j <= ncol; j=j+1){
+        ?"Now analysing parameters '" + parameter_name1 + "' = '" + num2str(parameter_values1(i)) + "', '" + parameter_name2 + "' = '" + num2str(parameter_values2(j)) + "'";
+        # Set the new parameter
+        n_modes(i, j) = set_and_run(parameter_scope, parameter_name2, parameter_values2(j), pump_lambda);
+        
+        # Store results if modes are found
+        if(n_modes(i, j) != 0){
+            
+            # Calculate and store the results
+            res = calculate_results(selected_mode, width_axis, height_axis, cladding_index, index_margin, meshcells_x, meshcells_y, pump_lambda);        
+            loss(i, j) = res.loss;
+            ng(i, j) = res.ng;
+            neff(i, j) = res.neff;
+            
+            # Calculate the integrated luminosity in bulk and at the surface
+            integrated_luminosity_bulk(i, j) = res.lum_bulk;
+            integrated_luminosity_surf(i, j) = res.lum_surf;
+            factor = dhakal_const * dhakal_factor(ng(i, j), ng(i, j), neff(i, j), neff(i, j), pump_lambda, pump_lambda);       
+            
+            # Store reseults for each iteration
+            if(save_to_json){
+                jsonsave(savename, parameter_name1, parameter_name2, parameter_values1, parameter_values2, integrated_luminosity_bulk, integrated_luminosity_surf, loss, ng, neff, n_modes, pump_lambda, dhakal_const, cladding_index);
+            }            
+        }
+        # Skip 'bad' nodes
+        if(ncol > 3 and j >= 3){
+            if (n_modes(i, j) == 0 and n_modes(i, j - 1) == 0 and n_modes(i, j - 2) == 0){
+                ?"Skipped '" + num2str(ncol - j) + "' iterations";                
+                j = ncol + 1;   # Skip the next iterations
+            }
+        }
+    }
+    if(nrow > 3 and i >= 3){
+        if(n_modes(i, 1) == 0 and n_modes(i - 1, 1) == 0 and n_modes(i - 2, 1) == 0){
+            ?"Sweep terminated at '" + parameter_name1 + "' = '" + num2str(parameter_values1(i)) + "'";            
+            i = nrow + 1;   # Terminate sweep
+        }
+    }
+}
+
+
+
+image(parameter_values1, parameter_values2, integrated_luminosity_bulk);

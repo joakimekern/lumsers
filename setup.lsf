@@ -1,0 +1,51 @@
+
+y_pos = (wg_width + wg_gap)/2;
+z_pos = -wg_height/2;
+gap_width = wg_gap - 2*(t_alox + t_au + t_ntp);     # width of the gap including deposited layers
+mesh_margin = 4e-9;             # buffer of the mesh override region
+t_coating = t_alox + t_au + t_ntp;     # total thickness of all despsited layers
+
+select("waveguide");
+set("y_pos", y_pos);
+set("wg_width", wg_width);
+set("wg_height", wg_height);
+set("wg_length", wg_length);
+set("t_siox", t_siox);
+
+select("alumina");
+set("y_pos", y_pos);
+set("z_pos", z_pos);
+set("t_alox", t_alox);
+set("wg_width", wg_width);
+set("wg_height", wg_height);
+set("wg_length", wg_length);
+
+select("plasmon");
+set("y_pos", y_pos);
+set("z_pos", z_pos);
+set("t_au", t_alox + t_au);
+set("wg_width", wg_width);
+set("wg_height", wg_height);
+set("wg_length", wg_length);
+
+select("ntp");
+set("y_pos", y_pos);
+set("z_pos", z_pos);
+set("t_ntp", t_alox + t_au + t_ntp);
+set("wg_width", wg_width);
+set("wg_height", wg_height);
+set("wg_length", wg_length);
+
+select("mesh_slot");                    # make the mesh override region only cover the gap
+set("y span", wg_gap + mesh_margin);
+set("z span", wg_height +t_coating + mesh_margin);
+set("z", 0);
+# set("z", t_coating);
+
+select("FDE");
+set("y span", y_span);
+set("z span", z_span);
+y_num = y_span / y_meshsize;
+z_num = z_span / z_meshsize;
+set("mesh cells y", y_num);
+set("mesh cells z", z_num);
